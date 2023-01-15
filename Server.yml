@@ -1,0 +1,137 @@
+Description: >
+  MichaelUdacityProject
+Parameters:
+  EnvironmentName:
+    Description: Environment Name that will be prefixed in order to access Variables exported from our networking Resources
+    Type: String
+
+
+Resources:
+  LBSecGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Allow http to Load Balanacer
+        VpcId:
+            Fn::ImportValue: !Sub "${EnvironmentName}-VPCID"
+        GroupName: Security Group for Load Balancer
+        SecurityGroupEgress:
+            - CidrIp: 0.0.0.0/0
+              FromPort: 80
+              ToPort: 80
+              IpProtocol: tcp
+        SecurityGroupIngress:
+            - CidrIp: 0.0.0.0/0
+              FromPort: 80
+              ToPort: 80
+              IpProtocol: tcp
+  
+  WebServerSecGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Allow http only from local VPC
+        VpcId:
+            Fn::ImportValue: !Sub "${EnvironmentName}-VPCID"
+        GroupName: Security Group for WebServer internal traffic
+        SecurityGroupEgress:
+            - CidrIp: 0.0.0.0/0
+              FromPort: 0
+              ToPort: 65535
+              IpProtocol: tcp
+        SecurityGroupIngress:
+            - CidrIp: 0.0.0.0/0
+              FromPort: 80
+              ToPort: 80
+              IpProtocol: tcp
+
+  WebAppLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          sudo apt-get update -y
+          sudo apt-get install unzip awscli -y
+          sudo apt-get install apache2 -y
+          sudo systemctl start apache2.service
+          sudo rm /var/www/html/index.html
+          sudo aws s3 cp s3://mykeudacity/index.html /var/www/html          
+          sudo systemctl restart apache2.service
+      ImageId: ami-08fdec01f5df9998f
+      #KeyName: cloudarchitectkey
+      IamInstanceProfile:
+        Fn::ImportValue: !Sub "${EnvironmentName}-MY-IAM"
+      SecurityGroups:
+        - Ref: WebServerSecGroup
+      InstanceType: t2.medium
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sdk"
+          Ebs:
+            VolumeSize: "10"
+            DeleteOnTermination: true
+            VolumeType: "gp2"
+
+  WebAppGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-Private-Subnets"
+      LaunchConfigurationName:
+        Ref: WebAppLaunchConfig
+      MinSize: "2"
+      MaxSize: "4"
+      DesiredCapacity: "4"
+      TargetGroupARNs:
+        - Ref: WebAppTargetGroup
+
+  WebAppLB:
+    Type: "AWS::ElasticLoadBalancingV2::LoadBalancer"
+    Properties:
+      Subnets:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PublicSubnet-1"
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PublicSubnet-2"
+      SecurityGroups:
+        - Ref: LBSecGroup
+
+  Listener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn:
+            Ref: WebAppTargetGroup
+      LoadBalancerArn:
+        Ref: WebAppLB
+      Port: "80"
+      Protocol: HTTP
+
+  ALBListenerRule:
+    Type: "AWS::ElasticLoadBalancingV2::ListenerRule"
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref "WebAppTargetGroup"
+      Conditions:
+        - Field: path-pattern
+          Values: [/]
+      ListenerArn: !Ref "Listener"
+      Priority: 1
+
+  WebAppTargetGroup:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 8
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${EnvironmentName}-VPCID"
+
+Outputs:
+  Website:
+    Description: The Public DNS of the load Balancer
+    Value: !Join ["", ["http://", !GetAtt [WebAppLB, DNSName]]]
